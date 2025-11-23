@@ -1,8 +1,10 @@
 from dotenv import load_dotenv
 import os
+from google.cloud import bigquery
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from google.cloud import bigquery
+from google.cloud.bigquery import Dataset, Table, SchemaField
 
 load_dotenv()
 
@@ -13,22 +15,18 @@ SERVICE_ACCOUNT_FILE = os.getenv("SERVICE_ACCOUNT_FILE")
 DELEGATED_ADMIN = os.getenv("DELEGATED_ADMIN")
 BQ_LOCATION = os.getenv("BQ_LOCATION")
 
-SCOPES = os.getenv("SCOPES").split(',')
-
-# Classroom scopes needed
+# Classroom scopes needed (these MUST match DWD scopes in Admin Console)
 CLASSROOM_SCOPES = [
     "https://www.googleapis.com/auth/classroom.courses.readonly",
-    "https://www.googleapis.com/auth/classroom.rosters.readonly"
+    "https://www.googleapis.com/auth/classroom.rosters.readonly",
 ]
 
-# BigQuery scope (not strictly necessary here; bigquery client will use google auth library)
-BQ_SCOPES = ["https://www.googleapis.com/auth/bigquery"]
-
-# === Authenticate ===
-sa_creds = service_account.Credentials.from_service_account_file(
-    SERVICE_ACCOUNT_FILE, scopes=CLASSROOM_SCOPES + BQ_SCOPES
+# === Authenticate for Classroom (with DWD) ===
+sa_classroom_creds = service_account.Credentials.from_service_account_file(
+    SERVICE_ACCOUNT_FILE,
+    scopes=CLASSROOM_SCOPES,
 )
-delegated_creds = sa_creds.with_subject(DELEGATED_ADMIN)
+delegated_creds = sa_classroom_creds.with_subject(DELEGATED_ADMIN)
 
 # Classroom service (impersonated)
 classroom = build("classroom", "v1", credentials=delegated_creds)
@@ -48,29 +46,34 @@ print(f"Fetched {len(courses)} courses")
 # Transform records into BigQuery-friendly rows
 rows = []
 for c in courses:
-    rows.append({
-        "course_id": c.get("id"),
-        "name": c.get("name"),
-        "section": c.get("section"),
-        "description": c.get("description"),
-        "room": c.get("room"),
-        "owner_id": c.get("ownerId"),
-        "creation_time": c.get("creationTime"),
-        "update_time": c.get("updateTime"),
-        "enrollment_code": c.get("enrollmentCode"),
-        "course_state": c.get("courseState"),
-        "alternate_link": c.get("alternateLink")
-    })
+    rows.append(
+        {
+            "course_id": c.get("id"),
+            "name": c.get("name"),
+            "section": c.get("section"),
+            "description": c.get("description"),
+            "room": c.get("room"),
+            "owner_id": c.get("ownerId"),
+            "creation_time": c.get("creationTime"),
+            "update_time": c.get("updateTime"),
+            "enrollment_code": c.get("enrollmentCode"),
+            "course_state": c.get("courseState"),
+            "alternate_link": c.get("alternateLink"),
+        }
+    )
 
-# === BigQuery client ===
-# Use service account creds (no subject needed for BigQuery ops) — reuse sa_creds
-bq_client = bigquery.Client(project=PROJECT_ID, credentials=sa_creds)
+# === BigQuery client (no DWD needed here) ===
+# BigQuery just needs normal service account IAM perms on the project/dataset
+bq_client = bigquery.Client.from_service_account_json(
+    SERVICE_ACCOUNT_FILE,
+    project=PROJECT_ID,
+)
 
 dataset_ref = f"{PROJECT_ID}.{DATASET_ID}"
+
 # create dataset if not exists
-from google.cloud.bigquery import Dataset, Table, SchemaField
 try:
-    dataset = bigquery.Dataset(dataset_ref)
+    dataset = Dataset(dataset_ref)
     dataset.location = BQ_LOCATION
     bq_client.create_dataset(dataset, exists_ok=True)
     print("Dataset ready:", dataset_ref)
@@ -100,12 +103,23 @@ try:
 except Exception as e:
     print("Table create error (maybe existed):", e)
 
-# Insert rows (streaming insert)
+
+# Insert rows using a load job (works on free tier)
 if rows:
-    errors = bq_client.insert_rows_json(table_ref, rows, row_ids=[None]*len(rows))
-    if errors:
-        print("Errors inserting rows:", errors)
-    else:
-        print(f"Inserted {len(rows)} rows into {table_ref}")
+    job_config = bigquery.LoadJobConfig(
+        write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE  # overwrite table each run
+    )
+
+    load_job = bq_client.load_table_from_json(
+        rows,
+        table_ref,        # "project.dataset.table"
+        job_config=job_config,
+    )
+
+    load_job.result()  # wait for job to finish
+
+    dest_table = bq_client.get_table(table_ref)
+    print(f"Loaded {dest_table.num_rows} rows into {table_ref}")
 else:
     print("No rows to insert.")
+
