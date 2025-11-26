@@ -110,7 +110,8 @@ def run():
                         submission_id = ss.get("id")
                         student_id = ss.get("userId")
                         state = ss.get("state")
-                        late = ss.get("late")
+                        late_raw = ss.get("late")
+                        late = True if late_raw in [True, "true", "TRUE", "1"] else False
                         grade = ss.get("assignedGrade")
                         creation_time = ss.get("creationTime")
                         update_time = ss.get("updateTime")
