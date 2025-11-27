@@ -2,9 +2,6 @@
 from datetime import datetime, timezone, date
 import logging
 import os
-from decimal import Decimal
-
-from pydantic import BaseModel
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
@@ -16,9 +13,7 @@ from backend import load_classroom_to_bq
 from backend import ingest_submissions
 from backend import ingest_enrollments
 from backend import dashboard_refresh
-from backend import nl_to_sql
-from backend.gemini_client import generate_text
-
+from backend.gemini_client import generate_text, generate_sql
 
 # ---- load env + basic logging ----
 load_dotenv()
@@ -40,20 +35,18 @@ class SyncRequest(BaseModel):
 
 class QueryCheckpointRequest(BaseModel):
     app: str = "classroom"
-    limit: int = 50  # how many rows from dashboard_temp
+    limit: int = 50  # rows from dashboard_temp
+
+
+class GeminiTestRequest(BaseModel):
+    prompt: str
+
 
 class QueryRunRequest(BaseModel):
     app: str = "classroom"
     question: str
-    limit: int = 50
+    max_rows: int = 100
 
-class NLQueryRequest(BaseModel): #pydanitic model for natural language query request
-    app: str = "classroom"
-    question: str
-    limit: int = 50 
-
-class GeminiTestRequest(BaseModel):
-    prompt: str
 
 # --------- HELPERS ---------
 def run_step(name: str, fn):
@@ -69,46 +62,37 @@ def run_step(name: str, fn):
         return {"ok": False, "rows": 0, "error": str(e)}
 
 
-def row_to_dict(row: bigquery.table.Row) -> dict:
+def row_to_serializable(row: bigquery.table.Row) -> dict:
     """
-    Convert a BigQuery Row to a JSON-serializable dict.
-    Handles date/datetime and Decimal.
+    Convert a BigQuery Row into a JSON-serializable dict.
+    Handles date / datetime / timestamp.
     """
     out = {}
     for k, v in row.items():
         if isinstance(v, (datetime, date)):
             out[k] = v.isoformat()
-        elif isinstance(v, decimal.Decimal):
-            out[k] = float(v)
-        else:
-            out[k] = v
-    return out
-
-def serialize_row(row: bigquery.table.Row) -> dict:
-    """
-    Convert a BigQuery Row into a JSON-serializable dict:
-    - datetime/date -> ISO string
-    - Decimal -> float
-    - everything else passthrough
-    """
-    raw = dict(row)
-    out = {}
-    for k, v in raw.items():
-        if isinstance(v, (datetime, date)):
-            out[k] = v.isoformat()
-        elif isinstance(v, Decimal):
-            out[k] = float(v)
         else:
             out[k] = v
     return out
 
 
-# --------- ROUTES ---------
+def get_bq_client() -> bigquery.Client:
+    """
+    Use the same service account JSON file you use for ingest.
+    """
+    return bigquery.Client.from_service_account_json(
+        SERVICE_ACCOUNT_FILE,
+        project=PROJECT_ID,
+    )
+
+
+# --------- ROUTES: HEALTH ---------
 @app.get("/")
 def root():
     return {"message": "Backend is running", "service": "CloudReign backend"}
 
 
+# --------- ROUTES: SYNC (Week 2) ---------
 @app.post("/sync/classroom/courses")
 def sync_classroom_courses():
     result = run_step("classroom_courses", load_classroom_to_bq.run)
@@ -206,7 +190,6 @@ def sync_classroom_all():
     )
 
 
-# --------- WEEK 2 QUERY CHECKPOINT ---------
 @app.post("/sync/app")
 def sync_app(body: SyncRequest):
     """
@@ -252,10 +235,10 @@ def sync_app(body: SyncRequest):
     )
 
 
+# --------- QUERY CHECKPOINT (Week 2) ---------
 @app.post("/query/checkpoint")
 def query_checkpoint(body: QueryCheckpointRequest):
     """
-    Week 2 'query checkpoint':
     Simple read from dashboard_temp so you can test backend -> BigQuery -> JSON.
     """
     if body.app != "classroom":
@@ -264,10 +247,7 @@ def query_checkpoint(body: QueryCheckpointRequest):
             content={"status": "error", "message": f"Unsupported app: {body.app}"},
         )
 
-    client = bigquery.Client.from_service_account_json(
-        SERVICE_ACCOUNT_FILE,
-        project=PROJECT_ID,
-    )
+    client = get_bq_client()
 
     sql = f"""
     SELECT
@@ -300,7 +280,9 @@ def query_checkpoint(body: QueryCheckpointRequest):
 
     query_job = client.query(sql, job_config=job_config)
     rows = list(query_job.result())
-    result = [serialize_row(row) for row in rows]
+
+    result = [row_to_serializable(r) for r in rows]
+
     return JSONResponse(
         {
             "status": "ok",
@@ -310,14 +292,33 @@ def query_checkpoint(body: QueryCheckpointRequest):
         }
     )
 
+
+# --------- GEMINI TEST (Week 3 sanity check) ---------
+@app.post("/gemini/test")
+def gemini_test(body: GeminiTestRequest):
+    """
+    Quick check that Gemini API + key are working.
+    """
+    try:
+        answer = generate_text(body.prompt)
+        return JSONResponse({"status": "ok", "answer": answer})
+    except Exception as e:
+        logger.exception("[GEMINI TEST ERROR]")
+        return JSONResponse(
+            status_code=500,
+            content={"status": "error", "message": str(e)},
+        )
+
+
+# --------- NL QUERY -> SQL -> BigQuery (Week 3 core) ---------
 @app.post("/query/run")
 def query_run(body: QueryRunRequest):
     """
-    Week 2/early Week 3: skeleton for natural language query endpoint.
-    For now:
-      - validate app
-      - ignore 'question' logically
-      - run a fixed/demo query against dashboard_temp
+    Week 3:
+      - Take a natural language question
+      - Ask Gemini to generate a BigQuery SQL query (for classroom dashboard)
+      - Run SQL
+      - Return rows + SQL text
     """
     if body.app != "classroom":
         return JSONResponse(
@@ -325,141 +326,67 @@ def query_run(body: QueryRunRequest):
             content={"status": "error", "message": f"Unsupported app: {body.app}"},
         )
 
-    client = bigquery.Client.from_service_account_json(
-        SERVICE_ACCOUNT_FILE,
-        project=PROJECT_ID,
-    )
+    # 1) Build prompt for Gemini
+    #    You can refine this prompt later.
+    prompt = f"""
+You are an expert data analyst. Generate a valid BigQuery SQL query for the
+`{PROJECT_ID}.{DATASET_ID}.dashboard_temp` table.
 
-    sql = f"""
-    SELECT
-      app,
-      metric_date,
-      course_id,
-      course_name,
-      section,
-      primary_teacher_email,
-      total_students,
-      total_submissions,
-      turned_in_submissions,
-      returned_submissions,
-      late_submissions,
-      avg_grade,
-      max_grade,
-      ingestion_time
-    FROM `{PROJECT_ID}.{DATASET_ID}.dashboard_temp`
-    WHERE app = @app
-    ORDER BY metric_date DESC
-    LIMIT @limit
-    """
+The schema of dashboard_temp is:
 
-    job_config = bigquery.QueryJobConfig(
-        query_parameters=[
-            bigquery.ScalarQueryParameter("app", "STRING", body.app),
-            bigquery.ScalarQueryParameter("limit", "INT64", body.limit),
-        ]
-    )
+- app STRING
+- metric_date DATE
+- course_id STRING
+- course_name STRING
+- section STRING
+- primary_teacher_email STRING
+- total_students INT64
+- total_submissions INT64
+- turned_in_submissions INT64
+- returned_submissions INT64
+- late_submissions INT64
+- avg_grade BIGNUMERIC
+- max_grade FLOAT64
+- ingestion_time TIMESTAMP
 
-    rows = list(client.query(sql, job_config=job_config).result())
-    result = [serialize_row(row) for row in rows]
+Rules:
+- Only query from `{PROJECT_ID}.{DATASET_ID}.dashboard_temp`.
+- Always filter `app = 'classroom'`.
+- Return at most {body.max_rows} rows using LIMIT.
+- Use standard SQL, no legacy syntax.
+- Wrap ONLY the SQL in a ```sql ... ``` block.
 
-    return JSONResponse(
-        {
-            "status": "ok",
-            "app": body.app,
-            "question": body.question,
-            "row_count": len(result),
-            "data": result,
-            "note": "Gemini integration will replace this fixed query.",
-        }
-    )
-@app.post("/query/run")
-def query_run(body: NLQueryRequest):
-    """
-    Week 3: Natural language -> (Gemini stub) -> SQL -> BigQuery.
-    No writing to dashboard_temp yet, just returning the rows.
-    """
-    if body.app != "classroom":
-        return JSONResponse(
-            status_code=400,
-            content={"status": "error", "message": f"Unsupported app: {body.app}"},
-        )
+User question:
+\"\"\"{body.question}\"\"\".
+"""
 
-    # 1) Get SQL template from NL adapter (Gemini later)
     try:
-        sql_template, extra_params = nl_to_sql(body.app, body.question)
-    except Exception as e:
-        logger.exception("[NL->SQL ERROR]")
-        return JSONResponse(
-            status_code=500,
-            content={"status": "error", "message": f"NL->SQL failed: {e}"},
-        )
+        sql = generate_sql(prompt)
+        logger.info(f"[QUERY RUN] Generated SQL:\n{sql}")
 
-    # 2) Fill in project/dataset placeholders
-    sql = sql_template.format(project=PROJECT_ID, dataset=DATASET_ID)
-
-    # 3) Prepare BigQuery client using the same service account
-    client = bigquery.Client.from_service_account_json(
-        SERVICE_ACCOUNT_FILE,
-        project=PROJECT_ID,
-    )
-
-    # 4) Build query parameters
-    params = [
-        bigquery.ScalarQueryParameter("app", "STRING", body.app),
-        bigquery.ScalarQueryParameter("limit", "INT64", body.limit),
-    ]
-    # attach any extra params from nl_to_sql if you decide to support them later
-
-    job_config = bigquery.QueryJobConfig(query_parameters=params)
-
-    # 5) Run query
-    try:
-        query_job = client.query(sql, job_config=job_config)
+        client = get_bq_client()
+        query_job = client.query(sql)
         rows = list(query_job.result())
+        result = [row_to_serializable(r) for r in rows]
+
+        return JSONResponse(
+            {
+                "status": "ok",
+                "app": body.app,
+                "question": body.question,
+                "sql": sql,
+                "row_count": len(result),
+                "data": result,
+            }
+        )
     except Exception as e:
         logger.exception("[QUERY RUN ERROR]")
         return JSONResponse(
             status_code=500,
-            content={"status": "error", "message": f"Query failed: {e}", "sql": sql},
-        )
-
-    # 6) Convert rows to JSON-serializable dicts (handle dates/TIMESTAMP)
-    result = []
-    for row in rows:
-        # row is a google.cloud.bigquery.table.Row
-        as_dict = {}
-        for k in row.keys():
-            v = row[k]
-            # normalize datetime/date for JSON
-            if hasattr(v, "isoformat"):
-                as_dict[k] = v.isoformat()
-            else:
-                as_dict[k] = v
-        result.append(as_dict)
-
-    return JSONResponse(
-        {
-            "status": "ok",
-            "app": body.app,
-            "question": body.question,
-            "generated_sql": sql,
-            "row_count": len(result),
-            "data": result,
-        }
-    )
-@app.post("/gemini/test")
-def gemini_test(body: GeminiTestRequest):
-    """
-    Simple sanity check: call Gemini with a prompt and return the raw text.
-    """
-    try:
-        answer = generate_text(body.prompt)
-        return JSONResponse(
-            {"status": "ok", "prompt": body.prompt, "answer": answer}
-        )
-    except Exception as e:
-        logger.exception("[GEMINI TEST ERROR]")
-        return JSONResponse(
-            {"status": "error", "message": str(e)},
-            status_code=500,
+            content={
+                "status": "error",
+                "app": body.app,
+                "question": body.question,
+                "error": str(e),
+            },
         )
