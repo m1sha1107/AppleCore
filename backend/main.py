@@ -4,6 +4,8 @@ import logging
 import os
 from decimal import Decimal
 
+from pydantic import BaseModel
+
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -14,6 +16,8 @@ from backend import load_classroom_to_bq
 from backend import ingest_submissions
 from backend import ingest_enrollments
 from backend import dashboard_refresh
+from backend import nl_to_sql
+
 
 # ---- load env + basic logging ----
 load_dotenv()
@@ -42,6 +46,10 @@ class QueryRunRequest(BaseModel):
     question: str
     limit: int = 50
 
+class NLQueryRequest(BaseModel): #pydanitic model for natural language query request
+    app: str = "classroom"
+    question: str
+    limit: int = 50 
 
 # --------- HELPERS ---------
 def run_step(name: str, fn):
@@ -358,5 +366,80 @@ def query_run(body: QueryRunRequest):
             "row_count": len(result),
             "data": result,
             "note": "Gemini integration will replace this fixed query.",
+        }
+    )
+@app.post("/query/run")
+def query_run(body: NLQueryRequest):
+    """
+    Week 3: Natural language -> (Gemini stub) -> SQL -> BigQuery.
+    No writing to dashboard_temp yet, just returning the rows.
+    """
+    if body.app != "classroom":
+        return JSONResponse(
+            status_code=400,
+            content={"status": "error", "message": f"Unsupported app: {body.app}"},
+        )
+
+    # 1) Get SQL template from NL adapter (Gemini later)
+    try:
+        sql_template, extra_params = nl_to_sql(body.app, body.question)
+    except Exception as e:
+        logger.exception("[NL->SQL ERROR]")
+        return JSONResponse(
+            status_code=500,
+            content={"status": "error", "message": f"NL->SQL failed: {e}"},
+        )
+
+    # 2) Fill in project/dataset placeholders
+    sql = sql_template.format(project=PROJECT_ID, dataset=DATASET_ID)
+
+    # 3) Prepare BigQuery client using the same service account
+    client = bigquery.Client.from_service_account_json(
+        SERVICE_ACCOUNT_FILE,
+        project=PROJECT_ID,
+    )
+
+    # 4) Build query parameters
+    params = [
+        bigquery.ScalarQueryParameter("app", "STRING", body.app),
+        bigquery.ScalarQueryParameter("limit", "INT64", body.limit),
+    ]
+    # attach any extra params from nl_to_sql if you decide to support them later
+
+    job_config = bigquery.QueryJobConfig(query_parameters=params)
+
+    # 5) Run query
+    try:
+        query_job = client.query(sql, job_config=job_config)
+        rows = list(query_job.result())
+    except Exception as e:
+        logger.exception("[QUERY RUN ERROR]")
+        return JSONResponse(
+            status_code=500,
+            content={"status": "error", "message": f"Query failed: {e}", "sql": sql},
+        )
+
+    # 6) Convert rows to JSON-serializable dicts (handle dates/TIMESTAMP)
+    result = []
+    for row in rows:
+        # row is a google.cloud.bigquery.table.Row
+        as_dict = {}
+        for k in row.keys():
+            v = row[k]
+            # normalize datetime/date for JSON
+            if hasattr(v, "isoformat"):
+                as_dict[k] = v.isoformat()
+            else:
+                as_dict[k] = v
+        result.append(as_dict)
+
+    return JSONResponse(
+        {
+            "status": "ok",
+            "app": body.app,
+            "question": body.question,
+            "generated_sql": sql,
+            "row_count": len(result),
+            "data": result,
         }
     )
