@@ -2,7 +2,7 @@
 from datetime import datetime, timezone, date
 import logging
 import os
-import decimal
+from decimal import Decimal
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
@@ -37,6 +37,11 @@ class QueryCheckpointRequest(BaseModel):
     app: str = "classroom"
     limit: int = 50  # how many rows from dashboard_temp
 
+class QueryRunRequest(BaseModel):
+    app: str = "classroom"
+    question: str
+    limit: int = 50
+
 
 # --------- HELPERS ---------
 def run_step(name: str, fn):
@@ -62,6 +67,24 @@ def row_to_dict(row: bigquery.table.Row) -> dict:
         if isinstance(v, (datetime, date)):
             out[k] = v.isoformat()
         elif isinstance(v, decimal.Decimal):
+            out[k] = float(v)
+        else:
+            out[k] = v
+    return out
+
+def serialize_row(row: bigquery.table.Row) -> dict:
+    """
+    Convert a BigQuery Row into a JSON-serializable dict:
+    - datetime/date -> ISO string
+    - Decimal -> float
+    - everything else passthrough
+    """
+    raw = dict(row)
+    out = {}
+    for k, v in raw.items():
+        if isinstance(v, (datetime, date)):
+            out[k] = v.isoformat()
+        elif isinstance(v, Decimal):
             out[k] = float(v)
         else:
             out[k] = v
@@ -265,15 +288,75 @@ def query_checkpoint(body: QueryCheckpointRequest):
 
     query_job = client.query(sql, job_config=job_config)
     rows = list(query_job.result())
-
-    # convert to JSON-serializable dicts
-    result = [row_to_dict(row) for row in rows]
-
+    result = [serialize_row(row) for row in rows]
     return JSONResponse(
         {
             "status": "ok",
             "app": body.app,
             "row_count": len(result),
             "data": result,
+        }
+    )
+
+@app.post("/query/run")
+def query_run(body: QueryRunRequest):
+    """
+    Week 2/early Week 3: skeleton for natural language query endpoint.
+    For now:
+      - validate app
+      - ignore 'question' logically
+      - run a fixed/demo query against dashboard_temp
+    """
+    if body.app != "classroom":
+        return JSONResponse(
+            status_code=400,
+            content={"status": "error", "message": f"Unsupported app: {body.app}"},
+        )
+
+    client = bigquery.Client.from_service_account_json(
+        SERVICE_ACCOUNT_FILE,
+        project=PROJECT_ID,
+    )
+
+    sql = f"""
+    SELECT
+      app,
+      metric_date,
+      course_id,
+      course_name,
+      section,
+      primary_teacher_email,
+      total_students,
+      total_submissions,
+      turned_in_submissions,
+      returned_submissions,
+      late_submissions,
+      avg_grade,
+      max_grade,
+      ingestion_time
+    FROM `{PROJECT_ID}.{DATASET_ID}.dashboard_temp`
+    WHERE app = @app
+    ORDER BY metric_date DESC
+    LIMIT @limit
+    """
+
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter("app", "STRING", body.app),
+            bigquery.ScalarQueryParameter("limit", "INT64", body.limit),
+        ]
+    )
+
+    rows = list(client.query(sql, job_config=job_config).result())
+    result = [serialize_row(row) for row in rows]
+
+    return JSONResponse(
+        {
+            "status": "ok",
+            "app": body.app,
+            "question": body.question,
+            "row_count": len(result),
+            "data": result,
+            "note": "Gemini integration will replace this fixed query.",
         }
     )
