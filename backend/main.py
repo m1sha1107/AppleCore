@@ -17,6 +17,7 @@ from backend import ingest_submissions
 from backend import ingest_enrollments
 from backend import dashboard_refresh
 from backend import nl_to_sql
+from backend.gemini_client import generate_text
 
 
 # ---- load env + basic logging ----
@@ -50,6 +51,9 @@ class NLQueryRequest(BaseModel): #pydanitic model for natural language query req
     app: str = "classroom"
     question: str
     limit: int = 50 
+
+class GeminiTestRequest(BaseModel):
+    prompt: str
 
 # --------- HELPERS ---------
 def run_step(name: str, fn):
@@ -443,3 +447,19 @@ def query_run(body: NLQueryRequest):
             "data": result,
         }
     )
+@app.post("/gemini/test")
+def gemini_test(body: GeminiTestRequest):
+    """
+    Simple sanity check: call Gemini with a prompt and return the raw text.
+    """
+    try:
+        answer = generate_text(body.prompt)
+        return JSONResponse(
+            {"status": "ok", "prompt": body.prompt, "answer": answer}
+        )
+    except Exception as e:
+        logger.exception("[GEMINI TEST ERROR]")
+        return JSONResponse(
+            {"status": "error", "message": str(e)},
+            status_code=500,
+        )
