@@ -7,10 +7,10 @@ load_dotenv()
 
 PROJECT_ID = os.getenv("PROJECT_ID")
 DATASET_ID = os.getenv("DATASET_ID", "workspace_analytics")
+SERVICE_ACCOUNT_FILE = os.getenv("SERVICE_ACCOUNT_FILE")
 
-# === Your EXACT WORKING SQL pasted verbatim ===
 DASHBOARD_REFRESH_SQL = f"""
-CREATE TABLE `{PROJECT_ID}.{DATASET_ID}.dashboard_temp`
+CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.dashboard_temp`
 PARTITION BY DATE(ingestion_time)
 OPTIONS(
   description = "App-specific daily metrics for dashboards"
@@ -59,18 +59,18 @@ FROM
   base;
 """
 
-def refresh_dashboard_temp() -> int:
+def run() -> int:
     """
-    Executes the dashboard_temp rebuild SQL.
-    Returns number of rows in dashboard_temp afterwards.
+    Rebuilds dashboard_temp and returns row count.
     """
-    client = bigquery.Client(project=PROJECT_ID)
+    client = bigquery.Client.from_service_account_json(
+        SERVICE_ACCOUNT_FILE,
+        project=PROJECT_ID,
+    )
 
-    # run the query
     job = client.query(DASHBOARD_REFRESH_SQL)
-    job.result()  # wait for it to finish
+    job.result()  # wait for completion
 
     table_ref = f"{PROJECT_ID}.{DATASET_ID}.dashboard_temp"
     table = client.get_table(table_ref)
-
     return table.num_rows
