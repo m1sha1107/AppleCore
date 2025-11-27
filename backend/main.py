@@ -14,6 +14,8 @@ from backend import ingest_submissions
 from backend import ingest_enrollments
 from backend import dashboard_refresh
 from backend.gemini_client import generate_text, generate_sql
+from backend import gemini_client
+
 
 # ---- load env + basic logging ----
 load_dotenv()
@@ -47,6 +49,11 @@ class QueryRunRequest(BaseModel):
     question: str
     max_rows: int = 100
 
+class NLQueryRequest(BaseModel):
+    app: str = "classroom"
+    question: str
+    max_rows: int = 100
+
 
 # --------- HELPERS ---------
 def run_step(name: str, fn):
@@ -60,6 +67,21 @@ def run_step(name: str, fn):
     except Exception as e:
         logger.exception(f"[STEP ERROR] {name} failed")
         return {"ok": False, "rows": 0, "error": str(e)}
+    
+def rows_to_json_safe(rows):
+    """
+    Convert BigQuery Row objects into JSON-serializable dicts.
+    """
+    out = []
+    for row in rows:
+        record = {}
+        for k, v in dict(row).items():
+            if isinstance(v, (datetime, date)):
+                record[k] = v.isoformat()
+            else:
+                record[k] = v
+        out.append(record)
+    return out
 
 
 def row_to_serializable(row: bigquery.table.Row) -> dict:
@@ -390,3 +412,79 @@ User question:
                 "error": str(e),
             },
         )
+
+
+@app.post("/query/nl")
+def query_nl(body: NLQueryRequest):
+    """
+    Simpler NL -> SQL endpoint (same idea as /query/run, but more direct).
+    """
+    if body.app != "classroom":
+        return JSONResponse(
+            status_code=400,
+            content={"status": "error", "message": f"Unsupported app: {body.app}"},
+        )
+
+    # 1) Build prompt for Gemini – same constraints as /query/run
+    prompt = f"""
+You are an expert data analyst. Generate a valid BigQuery SQL query for the
+`{PROJECT_ID}.{DATASET_ID}.dashboard_temp` table.
+
+The schema of dashboard_temp is:
+
+- app STRING
+- metric_date DATE
+- course_id STRING
+- course_name STRING
+- section STRING
+- primary_teacher_email STRING
+- total_students INT64
+- total_submissions INT64
+- turned_in_submissions INT64
+- returned_submissions INT64
+- late_submissions INT64
+- avg_grade BIGNUMERIC
+- max_grade FLOAT64
+- ingestion_time TIMESTAMP
+
+Rules:
+- Only query from `{PROJECT_ID}.{DATASET_ID}.dashboard_temp`.
+- Always filter app = 'classroom'.
+- Return at most {body.max_rows} rows using LIMIT.
+- Use standard SQL only.
+- Wrap ONLY the SQL in a ```sql ... ``` block.
+
+User question:
+\"\"\"{body.question}\"\"\".
+"""
+
+    # 2) Ask Gemini for SQL
+    sql = generate_sql(prompt)
+    logger.info(f"[NL QUERY] question={body.question!r} sql={sql!r}")
+
+    # 3) Safety: must be SELECT
+    if not sql.strip().upper().startswith("SELECT"):
+        return JSONResponse(
+            status_code=400,
+            content={
+                "status": "error",
+                "message": "Generated SQL does not start with SELECT",
+                "sql": sql,
+            },
+        )
+
+    # 4) Run query against BigQuery
+    client = get_bq_client()
+    job = client.query(sql)
+    rows = list(job.result())
+    data = [row_to_serializable(r) for r in rows]
+
+    return JSONResponse(
+        {
+            "status": "ok",
+            "app": body.app,
+            "sql": sql,
+            "row_count": len(data),
+            "data": data,
+        }
+    )

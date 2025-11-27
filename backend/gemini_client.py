@@ -1,69 +1,82 @@
 # backend/gemini_client.py
 import os
+import re
 from dotenv import load_dotenv
-from google import genai
-from google.genai import types
+import google.genai as genai
 
 load_dotenv()
 
-# Prefer GEMINI_API_KEY but also allow GOOGLE_API_KEY
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+
 if not GEMINI_API_KEY:
-    raise RuntimeError(
-        "Missing GEMINI_API_KEY/GOOGLE_API_KEY. "
-        "Set it in your .env from Google AI Studio."
-    )
+    raise RuntimeError("GEMINI_API_KEY is not set in environment")
 
-# Default model – you can override via .env
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-
-# Gemini API client (NOT Vertex, no project/location needed)
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 
-def generate_text(prompt: str, temperature: float = 0.3) -> str:
+def _extract_text(response) -> str:
     """
-    Simple helper: free-form text response from Gemini.
+    Flatten a google.genai response into a plain text string.
     """
-    resp = client.models.generate_content(
+    parts = []
+    for cand in response.candidates:
+        for part in cand.content.parts:
+            if hasattr(part, "text") and part.text:
+                parts.append(part.text)
+    return "\n".join(parts).strip()
+
+
+def generate_text(prompt: str) -> str:
+    """
+    Simple text generation helper (for /gemini/test).
+    """
+    response = client.models.generate_content(
         model=GEMINI_MODEL,
         contents=prompt,
-        config=types.GenerateContentConfig(
-            temperature=temperature,
-        ),
     )
-    # .text is already the concatenated text from all parts
-    return resp.text or ""
+    return _extract_text(response)
 
 
-def generate_sql(prompt: str, temperature: float = 0.0) -> str:
+def _extract_sql(raw: str) -> str:
     """
-    Ask Gemini to produce BigQuery SQL. We:
-      - ask it to wrap the SQL in ```sql ... ```
-      - parse that block out of the response.
+    Given raw model output, try to extract a clean SQL string:
+
+    - If there's a ```sql``` or ```bigquery``` fenced block, take that.
+    - Strip language prefixes like "sql\nSELECT" or "bigquery\nSELECT".
+    - Trim everything before the first SELECT.
+    - Remove trailing semicolon.
     """
-    resp = client.models.generate_content(
+    # 1) fenced code block
+    m = re.search(
+        r"```(?:sql|bigquery)?\s*(.*?)```",
+        raw,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    if m:
+        raw = m.group(1).strip()
+
+    # 2) find first SELECT
+    idx = raw.upper().find("SELECT")
+    if idx != -1:
+        raw = raw[idx:]
+
+    # 3) cleanup
+    raw = raw.strip()
+    if raw.endswith(";"):
+        raw = raw[:-1].strip()
+
+    return raw
+
+
+def generate_sql(prompt: str) -> str:
+    """
+    Generate SQL from a prompt and normalize it so it starts with SELECT.
+    """
+    response = client.models.generate_content(
         model=GEMINI_MODEL,
         contents=prompt,
-        config=types.GenerateContentConfig(
-            temperature=temperature,
-        ),
     )
-    text = resp.text or ""
-
-    # Try to extract ```sql ... ``` block if present
-    lower = text.lower()
-    start = lower.find("```sql")
-    if start != -1:
-        start = text.find("\n", start)
-        if start == -1:
-            start = 0
-        else:
-            start += 1
-        end = text.lower().find("```", start)
-        if end != -1:
-            sql = text[start:end].strip()
-            return sql
-
-    # Fallback: return the whole text (you can inspect it in logs)
-    return text.strip()
+    text = _extract_text(response)
+    sql = _extract_sql(text)
+    return sql
