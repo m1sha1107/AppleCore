@@ -1,6 +1,8 @@
+// src/App.jsx
 import SyncClassroom from "./components/SyncClassroom";
 import NLQueryBox from "./components/NLQueryBox";
 import DashboardPreview from "./components/DashboardPreview";
+import LookerDashboard from "./components/LookerDashboard";
 
 export default function App() {
   return (
@@ -14,6 +16,9 @@ export default function App() {
       <hr />
 
       <DashboardPreview />
+      <hr />
+
+      <LookerDashboard />
     </div>
   );
 }
