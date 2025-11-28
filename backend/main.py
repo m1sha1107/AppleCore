@@ -16,6 +16,9 @@ from backend import dashboard_refresh
 from backend.gemini_client import generate_text, generate_sql
 from backend import gemini_client
 
+from fastapi.middleware.cors import CORSMiddleware
+
+
 
 # ---- load env + basic logging ----
 load_dotenv()
@@ -28,6 +31,15 @@ DATASET_ID = os.getenv("DATASET_ID", "workspace_analytics")
 SERVICE_ACCOUNT_FILE = os.getenv("SERVICE_ACCOUNT_FILE")
 
 app = FastAPI()
+
+# ---------- CORS (required for frontend) ----------
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],     # for dev only, ok now
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 # --------- MODELS ---------

@@ -1,44 +1,207 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+
+const API_BASE = "http://127.0.0.1:8000"; // backend FastAPI URL
 
 export default function DashboardPreview() {
-  const [rows, setRows] = useState(null);
+  const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [limit, setLimit] = useState(50);
+  const [selectedCourseId, setSelectedCourseId] = useState("ALL");
 
-  async function load() {
-    setLoading(true);
-    setRows(null);
+  // --- derived: unique course options ---
+  const courseOptions = useMemo(() => {
+    const map = new Map(); // course_id -> label
+    rows.forEach((r) => {
+      if (!r.course_id) return;
+      const label = `${r.course_name || "(no name)"}${
+        r.section ? ` – ${r.section}` : ""
+      }`;
+      if (!map.has(r.course_id)) {
+        map.set(r.course_id, label);
+      }
+    });
+    return Array.from(map.entries()).map(([id, label]) => ({ id, label }));
+  }, [rows]);
 
+  const filteredRows = useMemo(() => {
+    if (selectedCourseId === "ALL") return rows;
+    return rows.filter((r) => r.course_id === selectedCourseId);
+  }, [rows, selectedCourseId]);
+
+  async function fetchDashboard() {
     try {
-      const res = await fetch("http://127.0.0.1:8000/query/checkpoint", {
+      setLoading(true);
+      setError("");
+
+      const res = await fetch(`${API_BASE}/query/checkpoint`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           app: "classroom",
-          limit: 10,
+          limit: Number(limit) || 50,
         }),
       });
 
-      const data = await res.json();
-      setRows(data);
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(
+          `Backend error (${res.status}): ${text || res.statusText}`
+        );
+      }
+
+      const json = await res.json();
+      setRows(json.data || []);
     } catch (err) {
-      setRows({ status: "error", message: err.message });
+      console.error("Failed to fetch dashboard_temp:", err);
+      setError(err.message || "Failed to fetch dashboard data.");
+      setRows([]);
     } finally {
       setLoading(false);
     }
   }
 
-  return (
-    <div>
-      <h2>Dashboard Preview (Last 10 Rows)</h2>
-      <button onClick={load} disabled={loading}>
-        {loading ? "Loading..." : "Load Data"}
-      </button>
+  // initial load
+  useEffect(() => {
+    fetchDashboard();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-      {rows && (
-        <pre style={{ background: "#eee", padding: "10px", marginTop: "10px" }}>
-          {JSON.stringify(rows, null, 2)}
-        </pre>
+  return (
+    <section style={{ marginTop: "24px" }}>
+      <h2 style={{ marginBottom: "4px" }}>Classroom dashboard data</h2>
+      <p style={{ marginTop: 0, fontSize: "12px", color: "#555" }}>
+        Live view of aggregated metrics from <code>dashboard_temp</code>.
+      </p>
+
+      {/* controls row */}
+      <div
+        style={{
+          display: "flex",
+          gap: "12px",
+          alignItems: "center",
+          marginBottom: "8px",
+        }}
+      >
+        <label style={{ fontSize: "12px" }}>
+          Course:&nbsp;
+          <select
+            value={selectedCourseId}
+            onChange={(e) => setSelectedCourseId(e.target.value)}
+          >
+            <option value="ALL">All courses</option>
+            {courseOptions.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.label}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label style={{ fontSize: "12px" }}>
+          Rows:&nbsp;
+          <input
+            type="number"
+            min={1}
+            max={500}
+            value={limit}
+            onChange={(e) => setLimit(e.target.value)}
+            style={{ width: "64px" }}
+          />
+        </label>
+
+        <button onClick={fetchDashboard} disabled={loading}>
+          {loading ? "Loading..." : "Refresh"}
+        </button>
+
+        <span style={{ fontSize: "12px", color: "#555" }}>
+          Showing {filteredRows.length} rows
+        </span>
+      </div>
+
+      {/* error banner */}
+      {error && (
+        <div
+          style={{
+            border: "1px solid #e00",
+            background: "#ffecec",
+            color: "#a00",
+            padding: "4px 8px",
+            marginBottom: "8px",
+            fontSize: "12px",
+          }}
+        >
+          Failed to fetch: {error}
+        </div>
       )}
-    </div>
+
+      {/* data table */}
+      <div style={{ overflowX: "auto" }}>
+        <table
+          style={{
+            borderCollapse: "collapse",
+            width: "100%",
+            fontSize: "12px",
+          }}
+        >
+          <thead>
+            <tr style={{ background: "#f5f5f5" }}>
+              <th style={th}>Metric date</th>
+              <th style={th}>Course</th>
+              <th style={th}>Section</th>
+              <th style={th}>Primary teacher</th>
+              <th style={th}>Students</th>
+              <th style={th}>Total submissions</th>
+              <th style={th}>Turned in</th>
+              <th style={th}>Returned</th>
+              <th style={th}>Late</th>
+              <th style={th}>Avg grade</th>
+              <th style={th}>Max grade</th>
+              <th style={th}>Ingested at</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filteredRows.length === 0 && !loading && !error && (
+              <tr>
+                <td style={td} colSpan={12}>
+                  No data available. Try running sync and then Refresh.
+                </td>
+              </tr>
+            )}
+            {filteredRows.map((row, idx) => (
+              <tr key={idx}>
+                <td style={td}>{row.metric_date}</td>
+                <td style={td}>{row.course_name}</td>
+                <td style={td}>{row.section}</td>
+                <td style={td}>{row.primary_teacher_email}</td>
+                <td style={td}>{row.total_students}</td>
+                <td style={td}>{row.total_submissions}</td>
+                <td style={td}>{row.turned_in_submissions}</td>
+                <td style={td}>{row.returned_submissions}</td>
+                <td style={td}>{row.late_submissions}</td>
+                <td style={td}>
+                  {row.avg_grade != null ? Number(row.avg_grade).toFixed(2) : ""}
+                </td>
+                <td style={td}>{row.max_grade}</td>
+                <td style={td}>{row.ingestion_time}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
   );
 }
+
+const th = {
+  border: "1px solid #ddd",
+  padding: "4px 6px",
+  textAlign: "left",
+  whiteSpace: "nowrap",
+};
+
+const td = {
+  border: "1px solid #eee",
+  padding: "4px 6px",
+  whiteSpace: "nowrap",
+};
