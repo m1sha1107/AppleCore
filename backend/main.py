@@ -66,6 +66,10 @@ class NLQueryRequest(BaseModel):
     question: str
     max_rows: int = 100
 
+class CourseTimeseriesRequest(BaseModel):
+    app: str = "classroom"
+    course_id: str
+    days: int = 30  # last N days of metrics
 
 # --------- HELPERS ---------
 def run_step(name: str, fn):
@@ -496,6 +500,110 @@ User question:
             "status": "ok",
             "app": body.app,
             "sql": sql,
+            "row_count": len(data),
+            "data": data,
+        }
+    )
+
+
+@app.get("/analytics/courses")
+def analytics_courses():
+    """
+    Return distinct classroom courses that appear in dashboard_temp.
+    Used to populate the course dropdown in the frontend.
+    """
+    client = get_bq_client()
+
+    sql = f"""
+    SELECT
+      course_id,
+      ANY_VALUE(course_name) AS course_name,
+      ANY_VALUE(section) AS section,
+      ANY_VALUE(primary_teacher_email) AS primary_teacher_email
+    FROM `{PROJECT_ID}.{DATASET_ID}.dashboard_temp`
+    WHERE app = 'classroom'
+    GROUP BY course_id
+    ORDER BY course_name
+    """
+
+    job = client.query(sql)
+    rows = list(job.result())
+    data = [row_to_serializable(r) for r in rows]
+
+    return JSONResponse(
+        {
+            "status": "ok",
+            "row_count": len(data),
+            "courses": data,
+        }
+    )
+
+from pydantic import BaseModel
+from fastapi.responses import JSONResponse
+from google.cloud import bigquery
+
+# ...
+
+class CourseTimeseriesRequest(BaseModel):
+    app: str = "classroom"
+    course_id: str
+    days: int = 30
+
+
+@app.post("/analytics/course_timeseries")
+def analytics_course_timeseries(body: CourseTimeseriesRequest):
+    """
+    Return a daily timeseries for a single course from dashboard_temp.
+    """
+    if body.app != "classroom":
+        return JSONResponse(
+            status_code=400,
+            content={"status": "error", "message": f"Unsupported app: {body.app}"},
+        )
+
+    client = get_bq_client()
+
+    sql = f"""
+    SELECT
+      metric_date,
+      course_id,
+      course_name,
+      section,
+      primary_teacher_email,
+      total_students,
+      total_submissions,
+      turned_in_submissions,
+      returned_submissions,
+      late_submissions,
+      avg_grade,
+      max_grade,
+      ingestion_time
+    FROM `{PROJECT_ID}.{DATASET_ID}.dashboard_temp`
+    WHERE app = @app
+      -- force course_id to STRING so it always matches the param
+      AND CAST(course_id AS STRING) = @course_id
+      AND metric_date >= DATE_SUB(CURRENT_DATE(), INTERVAL @days DAY)
+    ORDER BY metric_date ASC
+    """
+
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter("app", "STRING", body.app),
+            bigquery.ScalarQueryParameter("course_id", "STRING", body.course_id),
+            bigquery.ScalarQueryParameter("days", "INT64", body.days),
+        ]
+    )
+
+    job = client.query(sql, job_config=job_config)
+    rows = list(job.result())
+    data = [row_to_serializable(r) for r in rows]
+
+    return JSONResponse(
+        {
+            "status": "ok",
+            "app": body.app,
+            "course_id": body.course_id,
+            "days": body.days,
             "row_count": len(data),
             "data": data,
         }
