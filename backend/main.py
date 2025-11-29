@@ -68,8 +68,14 @@ class NLQueryRequest(BaseModel):
 
 class CourseTimeseriesRequest(BaseModel):
     app: str = "classroom"
+    course_id: str 
+    days: int = 30
+
+class CourseDetailRequest(BaseModel):
+    app: str = "classroom"
     course_id: str
-    days: int = 30  # last N days of metrics
+    days: int = 30  # window for rollup metrics
+
 
 # --------- HELPERS ---------
 def run_step(name: str, fn):
@@ -538,23 +544,11 @@ def analytics_courses():
         }
     )
 
-from pydantic import BaseModel
-from fastapi.responses import JSONResponse
-from google.cloud import bigquery
 
-# ...
-
-class CourseTimeseriesRequest(BaseModel):
-    app: str = "classroom"
-    course_id: str
-    days: int = 30
 
 
 @app.post("/analytics/course_timeseries")
 def analytics_course_timeseries(body: CourseTimeseriesRequest):
-    """
-    Return a daily timeseries for a single course from dashboard_temp.
-    """
     if body.app != "classroom":
         return JSONResponse(
             status_code=400,
@@ -566,37 +560,145 @@ def analytics_course_timeseries(body: CourseTimeseriesRequest):
     sql = f"""
     SELECT
       metric_date,
-      course_id,
-      course_name,
-      section,
-      primary_teacher_email,
-      total_students,
       total_submissions,
       turned_in_submissions,
       returned_submissions,
       late_submissions,
       avg_grade,
-      max_grade,
-      ingestion_time
+      max_grade
     FROM `{PROJECT_ID}.{DATASET_ID}.dashboard_temp`
     WHERE app = @app
-      -- force course_id to STRING so it always matches the param
+      -- cast to STRING to be safe regardless of underlying type
       AND CAST(course_id AS STRING) = @course_id
       AND metric_date >= DATE_SUB(CURRENT_DATE(), INTERVAL @days DAY)
-    ORDER BY metric_date ASC
+    ORDER BY metric_date
     """
 
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
             bigquery.ScalarQueryParameter("app", "STRING", body.app),
-            bigquery.ScalarQueryParameter("course_id", "STRING", body.course_id),
+            # IMPORTANT: treat course_id as STRING
+            bigquery.ScalarQueryParameter("course_id", "STRING", str(body.course_id)),
             bigquery.ScalarQueryParameter("days", "INT64", body.days),
         ]
     )
 
     job = client.query(sql, job_config=job_config)
     rows = list(job.result())
-    data = [row_to_serializable(r) for r in rows]
+
+    data = rows_to_json_safe(rows)
+
+    return JSONResponse(
+        {
+            "status": "ok",
+            "app": body.app,
+            "course_id": body.course_id,
+            "row_count": len(data),
+            "data": data,
+        }
+    )
+
+@app.post("/analytics/course_detail")
+def analytics_course_detail(body: CourseDetailRequest):
+    """
+    Course Detail:
+      - basic course metadata
+      - windowed rollup metrics from dashboard_temp
+      - recent assignments from classroom_submissions
+    """
+    if body.app != "classroom":
+        return JSONResponse(
+            status_code=400,
+            content={"status": "error", "message": f"Unsupported app: {body.app}"},
+        )
+
+    client = get_bq_client()
+
+    # --- 1) Course metadata (from dashboard_temp, latest metric_date) ---
+    sql_meta = f"""
+    SELECT
+      course_id,
+      ANY_VALUE(course_name) AS course_name,
+      ANY_VALUE(section) AS section,
+      ANY_VALUE(primary_teacher_email) AS primary_teacher_email,
+      MAX(metric_date) AS latest_metric_date
+    FROM `{PROJECT_ID}.{DATASET_ID}.dashboard_temp`
+    WHERE app = @app
+      AND course_id = @course_id
+    GROUP BY course_id
+    """
+
+    job_meta = client.query(
+        sql_meta,
+        job_config=bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("app", "STRING", body.app),
+                bigquery.ScalarQueryParameter("course_id", "STRING", body.course_id),
+            ]
+        ),
+    )
+    meta_rows = list(job_meta.result())
+    course_meta = rows_to_json_safe(meta_rows)[0] if meta_rows else None
+
+    # --- 2) Windowed rollup over last N days in dashboard_temp ---
+    sql_metrics = f"""
+    SELECT
+      SUM(total_submissions) AS total_submissions,
+      SUM(turned_in_submissions) AS turned_in_submissions,
+      SUM(returned_submissions) AS returned_submissions,
+      SUM(late_submissions) AS late_submissions,
+      AVG(avg_grade) AS avg_grade,
+      MAX(max_grade) AS max_grade,
+      MIN(metric_date) AS window_start,
+      MAX(metric_date) AS window_end
+    FROM `{PROJECT_ID}.{DATASET_ID}.dashboard_temp`
+    WHERE app = @app
+      AND course_id = @course_id
+      AND metric_date >= DATE_SUB(CURRENT_DATE(), INTERVAL @days DAY)
+    """
+
+    job_metrics = client.query(
+        sql_metrics,
+        job_config=bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("app", "STRING", body.app),
+                bigquery.ScalarQueryParameter("course_id", "STRING", body.course_id),
+                bigquery.ScalarQueryParameter("days", "INT64", body.days),
+            ]
+        ),
+    )
+    metrics_rows = list(job_metrics.result())
+    metrics_window = rows_to_json_safe(metrics_rows)[0] if metrics_rows else None
+
+    # --- 3) Recent assignments from classroom_submissions ---
+    sql_assignments = f"""
+    SELECT
+      course_work_id,
+      ANY_VALUE(course_work_title) AS course_work_title,
+      MIN(assigned_time) AS first_assigned_time,
+      MAX(due_time) AS due_time,
+      COUNT(*) AS submissions,
+      COUNTIF(state = 'TURNED_IN') AS turned_in,
+      COUNTIF(late IS TRUE) AS late_submissions,
+      AVG(grade) AS avg_grade,
+      MAX(max_grade) AS max_grade
+    FROM `{PROJECT_ID}.{DATASET_ID}.classroom_submissions`
+    WHERE course_id = @course_id
+    GROUP BY course_work_id
+    ORDER BY due_time DESC
+    LIMIT 20
+    """
+
+    job_assign = client.query(
+        sql_assignments,
+        job_config=bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("course_id", "STRING", body.course_id),
+            ]
+        ),
+    )
+    assign_rows = list(job_assign.result())
+    recent_assignments = rows_to_json_safe(assign_rows)
 
     return JSONResponse(
         {
@@ -604,7 +706,8 @@ def analytics_course_timeseries(body: CourseTimeseriesRequest):
             "app": body.app,
             "course_id": body.course_id,
             "days": body.days,
-            "row_count": len(data),
-            "data": data,
+            "course": course_meta,
+            "metrics_window": metrics_window,
+            "recent_assignments": recent_assignments,
         }
     )

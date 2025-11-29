@@ -1,276 +1,402 @@
 // src/components/CourseAnalytics.jsx
 import { useEffect, useState } from "react";
+import {
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  Legend,
+  ResponsiveContainer,
+  BarChart,
+  Bar,
+} from "recharts";
 
-const API_BASE = "http://127.0.0.1:8000"; // your FastAPI backend
+const BASE_URL =
+  import.meta.env.VITE_BACKEND_URL || "http://127.0.0.1:8000";
 
 export default function CourseAnalytics() {
   const [courses, setCourses] = useState([]);
-  const [loadingCourses, setLoadingCourses] = useState(false);
-  const [selectedCourseId, setSelectedCourseId] = useState("");
+  const [coursesLoading, setCoursesLoading] = useState(false);
+  const [coursesError, setCoursesError] = useState("");
+
+  const [selectedCourseId, setSelectedCourseId] = useState(null);
+  const [selectedCourseMeta, setSelectedCourseMeta] = useState(null);
+
   const [timeseries, setTimeseries] = useState([]);
-  const [loadingTS, setLoadingTS] = useState(false);
-  const [error, setError] = useState("");
+  const [tsLoading, setTsLoading] = useState(false);
+  const [tsError, setTsError] = useState("");
 
-  // ---- 1. fetch list of courses on mount ----
+  const [days, setDays] = useState(30); // time window
+
+  // ---------- LOAD COURSE LIST ON MOUNT ----------
   useEffect(() => {
-    const fetchCourses = async () => {
+    async function fetchCourses() {
       try {
-        setLoadingCourses(true);
-        setError("");
+        setCoursesLoading(true);
+        setCoursesError("");
 
-        const res = await fetch(`${API_BASE}/analytics/courses`);
+        const res = await fetch(`${BASE_URL}/analytics/courses`);
         if (!res.ok) {
           const text = await res.text();
-          throw new Error(`GET /analytics/courses failed: ${text}`);
+          throw new Error(`HTTP ${res.status}: ${text}`);
         }
 
         const json = await res.json();
         setCourses(json.courses || []);
-
-        if (json.courses && json.courses.length > 0) {
-          setSelectedCourseId(json.courses[0].course_id);
-        }
       } catch (err) {
-        console.error(err);
-        setError(err.message || "Failed to load courses");
+        console.error("Error fetching courses:", err);
+        setCoursesError(
+          err instanceof Error ? err.message : "Unknown error"
+        );
       } finally {
-        setLoadingCourses(false);
+        setCoursesLoading(false);
       }
-    };
+    }
 
     fetchCourses();
   }, []);
 
-  // ---- 2. whenever selectedCourseId changes, fetch timeseries ----
-  useEffect(() => {
-    if (!selectedCourseId) return;
+  // ---------- LOAD TIMESERIES FOR A COURSE ----------
+  async function loadTimeseries(course) {
+    if (!course?.course_id) return;
 
-    const fetchTimeseries = async () => {
-      try {
-        setLoadingTS(true);
-        setError("");
+    try {
+      setTsLoading(true);
+      setTsError("");
+      setTimeseries([]);
 
-        const res = await fetch(`${API_BASE}/analytics/course_timeseries`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            app: "classroom",
-            course_id: selectedCourseId,
-            days: 30, // last 30 days
-          }),
-        });
+      setSelectedCourseId(course.course_id);
+      setSelectedCourseMeta(course);
 
-        if (!res.ok) {
-          const text = await res.text();
-          throw new Error(`POST /analytics/course_timeseries failed: ${text}`);
-        }
+      const res = await fetch(`${BASE_URL}/analytics/course_timeseries`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          app: "classroom",
+          course_id: String(course.course_id), // force string
+          days: Number(days) || 30,
+        }),
+      });
 
-        const json = await res.json();
-        setTimeseries(json.data || []);
-      } catch (err) {
-        console.error(err);
-        setError(err.message || "Failed to load timeseries");
-      } finally {
-        setLoadingTS(false);
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`HTTP ${res.status}: ${text}`);
       }
-    };
 
-    fetchTimeseries();
-  }, [selectedCourseId]);
+      const json = await res.json();
+      setTimeseries(json.data || []);
+    } catch (err) {
+      console.error("Error fetching timeseries:", err);
+      setTsError(err instanceof Error ? err.message : "Unknown error");
+    } finally {
+      setTsLoading(false);
+    }
+  }
 
-  // ---- helpers ----
-  const selectedCourse = courses.find((c) => c.course_id === selectedCourseId);
+  // ---------- DERIVED: RECHARTS DATA ----------
+  const chartData = timeseries.map((row) => ({
+    date: (row.metric_date || "").slice(0, 10),
+    total: row.total_submissions ?? 0,
+    turnedIn: row.turned_in_submissions ?? 0,
+    returned: row.returned_submissions ?? 0,
+    late: row.late_submissions ?? 0,
+    avgGrade: row.avg_grade ?? 0,
+    maxGrade: row.max_grade ?? 0,
+  }));
 
-  const latestPoint =
-    timeseries.length > 0 ? timeseries[timeseries.length - 1] : null;
+  const latest = chartData[chartData.length - 1] || null;
 
+  // ---------- UI ----------
   return (
-    <section style={{ marginTop: "24px" }}>
-      <h2 style={{ marginBottom: "8px" }}>Course Analytics</h2>
+    <div style={{ padding: "16px" }}>
+      <h2 style={{ marginBottom: "12px" }}>Course Analytics</h2>
 
-      {/* error banner */}
-      {error && (
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "280px 1fr",
+          gap: "16px",
+          alignItems: "flex-start",
+        }}
+      >
+        {/* LEFT: COURSE LIST */}
         <div
           style={{
-            marginBottom: "12px",
-            padding: "8px 12px",
-            backgroundColor: "#ffe5e5",
-            border: "1px solid #ffb3b3",
-            borderRadius: "4px",
-            fontSize: "0.9rem",
+            border: "1px solid #ddd",
+            borderRadius: "8px",
+            padding: "12px",
+            maxHeight: "70vh",
+            overflowY: "auto",
           }}
         >
-          {error}
-        </div>
-      )}
-
-      {/* course selector */}
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: "12px",
-          marginBottom: "16px",
-        }}
-      >
-        <label>
-          Course:&nbsp;
-          <select
-            value={selectedCourseId}
-            onChange={(e) => setSelectedCourseId(e.target.value)}
-            disabled={loadingCourses || courses.length === 0}
-          >
-            {loadingCourses && <option>Loading...</option>}
-            {!loadingCourses && courses.length === 0 && (
-              <option>No courses found</option>
-            )}
-            {courses.map((course) => (
-              <option key={course.course_id} value={course.course_id}>
-                {course.course_name || "(no name)"}{" "}
-                {course.section ? `– ${course.section}` : ""}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        {selectedCourse && (
-          <span style={{ fontSize: "0.9rem", color: "#555" }}>
-            Teacher: {selectedCourse.primary_teacher_email || "Unknown"}
-          </span>
-        )}
-      </div>
-
-      {/* quick stats card */}
-      <div
-        style={{
-          display: "flex",
-          gap: "16px",
-          marginBottom: "20px",
-          flexWrap: "wrap",
-        }}
-      >
-        <StatCard
-          label="Total submissions (last point)"
-          value={latestPoint?.total_submissions ?? "–"}
-        />
-        <StatCard
-          label="Turned in"
-          value={latestPoint?.turned_in_submissions ?? "–"}
-        />
-        <StatCard
-          label="Returned"
-          value={latestPoint?.returned_submissions ?? "–"}
-        />
-        <StatCard
-          label="Late"
-          value={latestPoint?.late_submissions ?? "–"}
-        />
-        <StatCard
-          label="Avg grade"
-          value={
-            latestPoint?.avg_grade != null
-              ? Number(latestPoint.avg_grade).toFixed(2)
-              : "–"
-          }
-        />
-      </div>
-
-      {/* timeseries table */}
-      <div style={{ maxHeight: "320px", overflowY: "auto" }}>
-        {loadingTS ? (
-          <p>Loading timeseries…</p>
-        ) : timeseries.length === 0 ? (
-          <p>No data for this course in the selected window.</p>
-        ) : (
-          <table
+          <div
             style={{
-              borderCollapse: "collapse",
-              width: "100%",
-              fontSize: "0.9rem",
+              display: "flex",
+              justifyContent: "space-between",
+              marginBottom: "8px",
+              alignItems: "center",
             }}
           >
-            <thead>
-              <tr>
-                <Th>Date</Th>
-                <Th>Total</Th>
-                <Th>Turned in</Th>
-                <Th>Returned</Th>
-                <Th>Late</Th>
-                <Th>Avg grade</Th>
-                <Th>Max grade</Th>
-              </tr>
-            </thead>
-            <tbody>
-              {timeseries.map((row) => (
-                <tr key={row.metric_date}>
-                  <Td>{row.metric_date}</Td>
-                  <Td>{row.total_submissions}</Td>
-                  <Td>{row.turned_in_submissions}</Td>
-                  <Td>{row.returned_submissions}</Td>
-                  <Td>{row.late_submissions}</Td>
-                  <Td>
-                    {row.avg_grade != null
-                      ? Number(row.avg_grade).toFixed(2)
-                      : "–"}
-                  </Td>
-                  <Td>{row.max_grade ?? "–"}</Td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
-    </section>
-  );
-}
+            <strong>Courses</strong>
+            <span style={{ fontSize: "12px", color: "#666" }}>
+              {courses.length} found
+            </span>
+          </div>
 
-// small presentational helpers
-function StatCard({ label, value }) {
-  return (
-    <div
-      style={{
-        minWidth: "160px",
-        padding: "10px 12px",
-        borderRadius: "6px",
-        border: "1px solid #ddd",
-        backgroundColor: "#fafafa",
-      }}
-    >
-      <div style={{ fontSize: "0.75rem", color: "#777" }}>{label}</div>
-      <div style={{ fontSize: "1.2rem", fontWeight: 600, marginTop: "4px" }}>
-        {value}
+          {coursesLoading && <p>Loading courses…</p>}
+          {coursesError && (
+            <p style={{ color: "red", fontSize: "12px" }}>{coursesError}</p>
+          )}
+
+          {!coursesLoading && !coursesError && courses.length === 0 && (
+            <p style={{ fontSize: "12px", color: "#555" }}>
+              No courses found. Run a sync first.
+            </p>
+          )}
+
+          {courses.map((c) => (
+            <button
+              key={c.course_id}
+              onClick={() => loadTimeseries(c)}
+              style={{
+                width: "100%",
+                textAlign: "left",
+                padding: "8px 10px",
+                marginBottom: "6px",
+                borderRadius: "6px",
+                border:
+                  c.course_id === selectedCourseId
+                    ? "1px solid #2563eb"
+                    : "1px solid #ddd",
+                background:
+                  c.course_id === selectedCourseId ? "#eff6ff" : "#fff",
+                cursor: "pointer",
+                fontSize: "13px",
+              }}
+            >
+              <div style={{ fontWeight: 600 }}>
+                {c.course_name || "(no name)"}
+              </div>
+              <div style={{ fontSize: "11px", color: "#555" }}>
+                ID: {c.course_id}
+                {c.section ? ` • Section ${c.section}` : ""}
+              </div>
+            </button>
+          ))}
+        </div>
+
+        {/* RIGHT: DETAILS + CHARTS */}
+        <div>
+          {/* top controls */}
+          <div
+            style={{
+              marginBottom: "12px",
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+            }}
+          >
+            <div>
+              <h3 style={{ margin: 0 }}>
+                {selectedCourseMeta?.course_name || "Select a course"}
+              </h3>
+              {selectedCourseMeta && (
+                <div style={{ fontSize: "12px", color: "#555" }}>
+                  Course ID: {selectedCourseMeta.course_id}
+                  {selectedCourseMeta.section
+                    ? ` • Section ${selectedCourseMeta.section}`
+                    : ""}
+                </div>
+              )}
+            </div>
+
+            <div style={{ fontSize: "12px" }}>
+              <label>
+                Window (days):{" "}
+                <input
+                  type="number"
+                  min={1}
+                  max={365}
+                  value={days}
+                  onChange={(e) => setDays(e.target.value)}
+                  style={{ width: "60px", marginLeft: "4px" }}
+                />
+              </label>
+              {selectedCourseMeta && (
+                <button
+                  onClick={() => loadTimeseries(selectedCourseMeta)}
+                  style={{
+                    marginLeft: "8px",
+                    padding: "4px 10px",
+                    fontSize: "12px",
+                    borderRadius: "4px",
+                    border: "1px solid #2563eb",
+                    background: "#2563eb",
+                    color: "#fff",
+                    cursor: "pointer",
+                  }}
+                >
+                  Refresh
+                </button>
+              )}
+            </div>
+          </div>
+
+          {tsLoading && <p>Loading time series…</p>}
+          {tsError && (
+            <p style={{ color: "red", fontSize: "12px" }}>{tsError}</p>
+          )}
+
+          {!tsLoading && !tsError && !selectedCourseId && (
+            <p style={{ fontSize: "13px", color: "#555" }}>
+              Pick a course on the left to see trends.
+            </p>
+          )}
+
+          {!tsLoading &&
+            !tsError &&
+            selectedCourseId &&
+            chartData.length === 0 && (
+              <p style={{ fontSize: "13px", color: "#555" }}>
+                No data in this window. Try expanding days or running a sync.
+              </p>
+            )}
+
+          {/* SUMMARY CARDS */}
+          {latest && (
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+                gap: "10px",
+                marginBottom: "12px",
+              }}
+            >
+              <SummaryCard label="Total submissions" value={latest.total} />
+              <SummaryCard label="Turned in" value={latest.turnedIn} />
+              <SummaryCard label="Returned" value={latest.returned} />
+              <SummaryCard label="Late" value={latest.late} />
+            </div>
+          )}
+
+          {/* CHARTS */}
+          {chartData.length > 0 && (
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "2fr 1fr",
+                gap: "16px",
+              }}
+            >
+              {/* Submissions over time */}
+              <div
+                style={{
+                  border: "1px solid #ddd",
+                  borderRadius: "8px",
+                  padding: "8px",
+                  height: "300px",
+                }}
+              >
+                <div
+                  style={{
+                    fontSize: "13px",
+                    fontWeight: 600,
+                    marginBottom: "4px",
+                  }}
+                >
+                  Submissions over time
+                </div>
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={chartData}>
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis dataKey="date" />
+                    <YAxis />
+                    <Tooltip />
+                    <Legend />
+                    <Line
+                      type="monotone"
+                      dataKey="total"
+                      name="Total"
+                      stroke="#2563eb"
+                      dot={false}
+                    />
+                    <Line
+                      type="monotone"
+                      dataKey="turnedIn"
+                      name="Turned in"
+                      stroke="#16a34a"
+                      dot={false}
+                    />
+                    <Line
+                      type="monotone"
+                      dataKey="returned"
+                      name="Returned"
+                      stroke="#9333ea"
+                      dot={false}
+                    />
+                    <Line
+                      type="monotone"
+                      dataKey="late"
+                      name="Late"
+                      stroke="#dc2626"
+                      dot={false}
+                    />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+
+              {/* Grade distribution */}
+              <div
+                style={{
+                  border: "1px solid #ddd",
+                  borderRadius: "8px",
+                  padding: "8px",
+                  height: "300px",
+                }}
+              >
+                <div
+                  style={{
+                    fontSize: "13px",
+                    fontWeight: 600,
+                    marginBottom: "4px",
+                  }}
+                >
+                  Average grade over time
+                </div>
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={chartData}>
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis dataKey="date" />
+                    <YAxis />
+                    <Tooltip />
+                    <Legend />
+                    <Bar dataKey="avgGrade" name="Avg grade" fill="#2563eb" />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
 }
 
-function Th({ children }) {
+function SummaryCard({ label, value }) {
   return (
-    <th
+    <div
       style={{
-        borderBottom: "1px solid #ddd",
-        textAlign: "left",
-        padding: "6px 8px",
-        backgroundColor: "#f3f3f3",
-        position: "sticky",
-        top: 0,
-        zIndex: 1,
+        border: "1px solid #ddd",
+        borderRadius: "8px",
+        padding: "8px 10px",
+        fontSize: "12px",
+        background: "#fafafa",
       }}
     >
-      {children}
-    </th>
-  );
-}
-
-function Td({ children }) {
-  return (
-    <td
-      style={{
-        borderBottom: "1px solid #eee",
-        padding: "6px 8px",
-      }}
-    >
-      {children}
-    </td>
+      <div style={{ color: "#555", marginBottom: "4px" }}>{label}</div>
+      <div style={{ fontWeight: 700, fontSize: "16px" }}>{value}</div>
+    </div>
   );
 }
