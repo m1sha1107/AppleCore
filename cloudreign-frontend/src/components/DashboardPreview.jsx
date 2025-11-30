@@ -1,6 +1,8 @@
+// src/components/DashboardPreview.jsx
 import { useEffect, useMemo, useState } from "react";
 
-const API_BASE = "http://127.0.0.1:8000"; // backend FastAPI URL
+const API_BASE =
+  import.meta.env.VITE_BACKEND_URL || "http://127.0.0.1:8000";
 
 export default function DashboardPreview() {
   const [rows, setRows] = useState([]);
@@ -8,6 +10,7 @@ export default function DashboardPreview() {
   const [error, setError] = useState("");
   const [limit, setLimit] = useState(50);
   const [selectedCourseId, setSelectedCourseId] = useState("ALL");
+  const [backendRowCount, setBackendRowCount] = useState(null);
 
   // --- derived: unique course options ---
   const courseOptions = useMemo(() => {
@@ -26,13 +29,14 @@ export default function DashboardPreview() {
 
   const filteredRows = useMemo(() => {
     if (selectedCourseId === "ALL") return rows;
-    return rows.filter((r) => r.course_id === selectedCourseId);
+    return rows.filter((r) => String(r.course_id) === String(selectedCourseId));
   }, [rows, selectedCourseId]);
 
   async function fetchDashboard() {
     try {
       setLoading(true);
       setError("");
+      setBackendRowCount(null);
 
       const res = await fetch(`${API_BASE}/query/checkpoint`, {
         method: "POST",
@@ -46,15 +50,25 @@ export default function DashboardPreview() {
       if (!res.ok) {
         const text = await res.text();
         throw new Error(
-          `Backend error (${res.status}): ${text || res.statusText}`
+          `Backend HTTP ${res.status}: ${text || res.statusText}`
         );
       }
 
       const json = await res.json();
-      setRows(json.data || []);
+      console.log("checkpoint response:", json);
+
+      if (json.status && json.status !== "ok") {
+        throw new Error(json.message || `Backend status: ${json.status}`);
+      }
+
+      const data = Array.isArray(json.data) ? json.data : [];
+      setRows(data);
+      setBackendRowCount(
+        typeof json.row_count === "number" ? json.row_count : data.length
+      );
     } catch (err) {
       console.error("Failed to fetch dashboard_temp:", err);
-      setError(err.message || "Failed to fetch dashboard data.");
+      setError(err instanceof Error ? err.message : "Failed to fetch data.");
       setRows([]);
     } finally {
       setLoading(false);
@@ -116,6 +130,7 @@ export default function DashboardPreview() {
 
         <span style={{ fontSize: "12px", color: "#555" }}>
           Showing {filteredRows.length} rows
+          {backendRowCount !== null ? ` (backend row_count=${backendRowCount})` : ""}
         </span>
       </div>
 
@@ -170,7 +185,11 @@ export default function DashboardPreview() {
             )}
             {filteredRows.map((row, idx) => (
               <tr key={idx}>
-                <td style={td}>{row.metric_date}</td>
+                <td style={td}>
+                  {row.metric_date
+                    ? String(row.metric_date).slice(0, 10)
+                    : ""}
+                </td>
                 <td style={td}>{row.course_name}</td>
                 <td style={td}>{row.section}</td>
                 <td style={td}>{row.primary_teacher_email}</td>
@@ -180,10 +199,16 @@ export default function DashboardPreview() {
                 <td style={td}>{row.returned_submissions}</td>
                 <td style={td}>{row.late_submissions}</td>
                 <td style={td}>
-                  {row.avg_grade != null ? Number(row.avg_grade).toFixed(2) : ""}
+                  {row.avg_grade != null
+                    ? Number(row.avg_grade).toFixed(2)
+                    : ""}
                 </td>
                 <td style={td}>{row.max_grade}</td>
-                <td style={td}>{row.ingestion_time}</td>
+                <td style={td}>
+                  {row.ingestion_time
+                    ? String(row.ingestion_time).replace("T", " ")
+                    : ""}
+                </td>
               </tr>
             ))}
           </tbody>
