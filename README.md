@@ -140,7 +140,7 @@ You can embed any Looker dashboard via iframe.
 
 ---
 
-## ** Technology Stack**
+## **Technology Stack**
 
 ### **Backend**
 
@@ -160,7 +160,7 @@ You can embed any Looker dashboard via iframe.
 
 ---
 
-## ** BigQuery Tables**
+## **BigQuery Tables**
 
 During sync, the following tables are populated:
 
@@ -173,7 +173,7 @@ During sync, the following tables are populated:
 
 ---
 
-## ** API Endpoints**
+## **API Endpoints**
 
 ### **Sync**
 
@@ -216,7 +216,7 @@ POST /analytics/course_detail
 
 ---
 
-## ** Backend Setup**
+## **Backend Setup**
 
 ### **1. Install dependencies**
 
@@ -250,7 +250,7 @@ http://127.0.0.1:8000
 
 ---
 
-## ** Frontend Setup**
+## **Frontend Setup**
 
 ### **1. Install**
 
@@ -274,7 +274,7 @@ npm run dev
 
 ---
 
-## ** How Everything Works (End-to-End)**
+## **How Everything Works (End-to-End)**
 
 1. User clicks **Sync Classroom**
 2. Backend fetches Classroom data
@@ -286,7 +286,7 @@ npm run dev
 
 ---
 
-## ** Component Overview**
+## **Component Overview**
 
 ### **SyncClassroom.jsx**
 
@@ -321,5 +321,6 @@ Detailed course view (metadata + students).
 * More chart types (scatter, stacked bar)
 
 MIT License.
+
 
 
