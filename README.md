@@ -311,7 +311,7 @@ Detailed course view (metadata + students).
 ---
 
 
-## ** Roadmap**
+## **Roadmap**
 
 * Tailwind styling pass
 * Saved queries
@@ -320,13 +320,6 @@ Detailed course view (metadata + students).
 * Better error messages
 * More chart types (scatter, stacked bar)
 
----
-
-## ** Contributing**
-PRs and issues welcome.
----
-
-## **License**
-
 MIT License.
+
 
