@@ -138,7 +138,7 @@ def root():
     return {"message": "Backend is running", "service": "CloudReign backend"}
 
 
-# --------- ROUTES: SYNC (Week 2) ---------
+# --------- ROUTES: FOR LOADING ---------
 @app.post("/sync/classroom/courses")
 def sync_classroom_courses():
     result = run_step("classroom_courses", load_classroom_to_bq.run)
